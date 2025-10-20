@@ -48,6 +48,7 @@ I2C_HandleTypeDef hi2c1;
 UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
+uint32_t LoopTimer = 0;
 //gyro
 volatile float RateRoll, RatePitch, RateYaw = 0;
 float RateCalibrationRoll, RateCalibrationPitch, RateCalibrationYaw;
@@ -57,6 +58,15 @@ int RateCalibrationNumber;
 //accelerometer
 float AccX, AccY, AccZ;
 float AngleRoll, AnglePitch;
+float AngleCalibrationRoll = 0; // Thêm dòng này
+float AngleCalibrationPitch = 0; // Thêm dòng này
+
+//kalman filter
+float KalmanAngleRoll=0, 
+KalmanUncertaintyAngleRoll=2*2; //gia su sai so 2 do thi phuong sai la 2^2
+float KalmanAnglePitch=0, 
+KalmanUncertaintyAnglePitch=2*2;
+float Kalman1DOutput[]={0,0};
 
 // vi 0x68 co 7 bit ma ta dia chi can 8 bit nen ta dich 1 bit
 static inline HAL_StatusTypeDef wr8(I2C_HandleTypeDef* hi2c, uint8_t reg, uint8_t val) {
@@ -66,6 +76,19 @@ static inline HAL_StatusTypeDef rd(I2C_HandleTypeDef* hi2c, uint8_t reg, uint8_t
   return HAL_I2C_Mem_Read(hi2c, 0x68<<1, reg, I2C_MEMADD_SIZE_8BIT, buf, len, 100);
 }
 
+//kalman filter lay input la: gia tri truoc do, sai so truoc do, input(rate_gyro), gia tri measure (angle_accelerometer) 
+void kalman_1d(float KalmanState, 
+  float KalmanUncertainty, float KalmanInput, 
+  float KalmanMeasurement) 
+  {
+    KalmanState=KalmanState+0.004*KalmanInput; //B1: du doan tho (raw) goc hien tai (angle(k) = angle(k-1) + dt*toc_do_goc )
+    KalmanUncertainty=KalmanUncertainty + 0.004*0.004 * 4 * 4; //B2 du doan tho (raw) sai so hien tai
+    float KalmanGain=KalmanUncertainty * 1/(1*KalmanUncertainty + 3 * 3); //B3: tinh he so kalman gain
+    KalmanState=KalmanState+KalmanGain * (KalmanMeasurement-KalmanState); //B4: du doan toi uu goc hien tai (angle_kalman)
+    KalmanUncertainty=(1-KalmanGain) *  KalmanUncertainty; //B5: du doan toi uu sai so hien tai (saiSo_kalman)
+    Kalman1DOutput[0]=KalmanState; //luu goc du doan_kalman hien tai
+    Kalman1DOutput[1]=KalmanUncertainty; //luu sai so du doan_kalman hien tai
+ }
 void gyro_signal(void){
   
   uint8_t b[6];
@@ -147,17 +170,15 @@ int main(void)
   MX_I2C1_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
-  HAL_Delay(250); 
+  HAL_Delay(250);
+    (void)wr8(&hi2c1, 0x6B, 0x00);  // wake mpu 
   (void)wr8(&hi2c1, 0x1A,0x05); // cho thanh ghi 0x1A = 0x05 => low pass filter ~10hz
   (void)wr8(&hi2c1, 0x1B,0x08); // config sensing scale factor la *65.5*/ do/s
   //sample rate cua cam bien binh thuong la 8khz, neu bat lowpassfilter thi doc la 1000hz
-  (void)wr8(&hi2c1, 0x19, 0x09); // Set Sample Rate cua cam bien = 1kHz / (1 + 9) = 100Hz
-  (void)wr8(&hi2c1, 0x1C, 0x10);
+  (void)wr8(&hi2c1, 0x19, 0x03); // Set Sample Rate cua cam bien = 1kHz / (1 + 9) = 100Hz
+  (void)wr8(&hi2c1, 0x1C, 0x10); // set full scale range cua accelerometer la +-8g
   
-  
-  
-  (void)wr8(&hi2c1, 0x6B, 0x00);  // wake mpu
-  //calibrate gyro
+  //calibrate gyro && accelerometer
   for (RateCalibrationNumber = 0;
 	  RateCalibrationNumber < 2000;
 	  RateCalibrationNumber++)
@@ -166,11 +187,18 @@ int main(void)
 	  RateCalibrationPitch += RatePitch;
 	  RateCalibrationRoll += RateRoll;
 	  RateCalibrationYaw += RateYaw;
+
+	  AngleCalibrationPitch += AnglePitch;
+	  AngleCalibrationRoll += AngleRoll;
 	  HAL_Delay(1);
   }
-  RateCalibrationPitch/=2000;
-  RateCalibrationRoll/=2000;
-  RateCalibrationYaw/=2000;
+	RateCalibrationPitch/=2000;
+	RateCalibrationRoll/=2000;
+	RateCalibrationYaw/=2000;
+
+	AngleCalibrationPitch /= 2000;
+	AngleCalibrationRoll /= 2000;
+	LoopTimer = HAL_GetTick();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -180,11 +208,22 @@ int main(void)
     /* USER CODE END WHILE */ 
 
     /* USER CODE BEGIN 3 */
-    gyro_signal();         // đọc gyro
+    gyro_signal();
+    //calib gyro && accelerometer
     RatePitch -= RateCalibrationPitch;
     RateRoll -= RateCalibrationRoll;
     RateYaw -= RateCalibrationYaw;
-    HAL_Delay(50);         // như Arduino: 50 ms
+    AnglePitch -= AngleCalibrationPitch;
+	AngleRoll -= AngleCalibrationRoll;
+
+    kalman_1d(KalmanAngleRoll,KalmanUncertaintyAngleRoll, RateRoll, AngleRoll);
+    KalmanAngleRoll=Kalman1DOutput[0];
+    KalmanUncertaintyAngleRoll=Kalman1DOutput[1];
+    kalman_1d(KalmanAnglePitch,KalmanUncertaintyAnglePitch, RatePitch, AnglePitch);
+    KalmanAnglePitch=Kalman1DOutput[0];
+    KalmanUncertaintyAnglePitch=Kalman1DOutput[1];
+    while (HAL_GetTick() - LoopTimer <4);
+    LoopTimer = HAL_GetTick();
 
   }
   /* USER CODE END 3 */
