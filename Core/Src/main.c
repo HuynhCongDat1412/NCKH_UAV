@@ -24,7 +24,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
-
+#include "rc_ppm.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -44,6 +44,8 @@
 
 /* Private variables ---------------------------------------------------------*/
 I2C_HandleTypeDef hi2c1;
+
+TIM_HandleTypeDef htim2;
 
 UART_HandleTypeDef huart1;
 
@@ -128,7 +130,15 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_USART1_UART_Init(void);
+static void MX_TIM2_Init(void);
 /* USER CODE BEGIN PFP */
+void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
+{
+  if (htim->Instance == TIM2 && htim->Channel == HAL_TIM_ACTIVE_CHANNEL_1) {
+    uint32_t ts = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1); // 1 µs nếu PSC=99
+    RC_PPM_OnCapture(htim, ts);
+  }
+}
 
 /* USER CODE END PFP */
 
@@ -169,6 +179,7 @@ int main(void)
   MX_GPIO_Init();
   MX_I2C1_Init();
   MX_USART1_UART_Init();
+  MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
   HAL_Delay(250);
     (void)wr8(&hi2c1, 0x6B, 0x00);  // wake mpu 
@@ -198,6 +209,10 @@ int main(void)
 
 	AngleCalibrationPitch /= 2000;
 	AngleCalibrationRoll /= 2000;
+  // === KHỞI TẠO VÀ BẮT ĐẦU PPM ===
+  RC_PPM_Init(&htim2);                                // Khởi tạo module PPM với Timer 2
+  HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_1);         // Bắt đầu Input Capture với ngắt trên Kênh 1
+  // ==============================
 	LoopTimer = HAL_GetTick();
   /* USER CODE END 2 */
 
@@ -205,9 +220,14 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    /* USER CODE END WHILE */ 
+    /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+
+    uint16_t roll_cmd_us    = rc_channels[0]; // Kênh 1 (Roll)
+    uint16_t pitch_cmd_us   = rc_channels[1]; // Kênh 2 (Pitch)
+    uint16_t throttle_cmd_us = rc_channels[2]; // Kênh 3 (Throttle)
+    uint16_t yaw_cmd_us     = rc_channels[3]; // Kênh 4 (Yaw)
     gyro_signal();
     //calib gyro && accelerometer
     RatePitch -= RateCalibrationPitch;
@@ -222,6 +242,14 @@ int main(void)
     kalman_1d(KalmanAnglePitch,KalmanUncertaintyAnglePitch, RatePitch, AnglePitch);
     KalmanAnglePitch=Kalman1DOutput[0];
     KalmanUncertaintyAnglePitch=Kalman1DOutput[1];
+
+    // --- Chuyển đổi giá trị RC (µs) thành giá trị mong muốn (góc/tốc độ) ---
+    // Ví dụ:
+    float desired_roll_angle = ((float)roll_cmd_us - 1500.0f) * 0.1f;  // [-50, 50] độ
+    float desired_pitch_angle = ((float)pitch_cmd_us - 1500.0f) * 0.1f; // [-50, 50] độ
+    float desired_yaw_rate = ((float)yaw_cmd_us - 1500.0f) * 0.15f; // [-75, 75] độ/s
+    float throttle_value = (float)throttle_cmd_us;                   // Giữ nguyên µs hoặc chuyển đổi tùy PID
+
     while (HAL_GetTick() - LoopTimer <4);
     LoopTimer = HAL_GetTick();
 
@@ -229,7 +257,7 @@ int main(void)
   /* USER CODE END 3 */
 }
 
-/**c
+/**
   * @brief System Clock Configuration
   * @retval None
   */
@@ -306,6 +334,54 @@ static void MX_I2C1_Init(void)
   /* USER CODE BEGIN I2C1_Init 2 */
 
   /* USER CODE END I2C1_Init 2 */
+
+}
+
+/**
+  * @brief TIM2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM2_Init(void)
+{
+
+  /* USER CODE BEGIN TIM2_Init 0 */
+
+  /* USER CODE END TIM2_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_IC_InitTypeDef sConfigIC = {0};
+
+  /* USER CODE BEGIN TIM2_Init 1 */
+
+  /* USER CODE END TIM2_Init 1 */
+  htim2.Instance = TIM2;
+  htim2.Init.Prescaler = 99;
+  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim2.Init.Period = 4294967295;
+  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_IC_Init(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigIC.ICPolarity = TIM_INPUTCHANNELPOLARITY_RISING;
+  sConfigIC.ICSelection = TIM_ICSELECTION_DIRECTTI;
+  sConfigIC.ICPrescaler = TIM_ICPSC_DIV1;
+  sConfigIC.ICFilter = 4;
+  if (HAL_TIM_IC_ConfigChannel(&htim2, &sConfigIC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM2_Init 2 */
+
+  /* USER CODE END TIM2_Init 2 */
 
 }
 
