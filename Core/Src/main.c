@@ -35,6 +35,16 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define RAD2DEG 57.2957795f
+#define MOTOR_MIN_US       1000
+#define MOTOR_MAX_US       2000
+// Giới hạn cho vòng Angle (Outer)
+#define ANGLE_RATE_LIMIT 250.0f  // deg/s (Đầu ra tối đa)
+#define ANGLE_I_LIMIT    100.0f  //  (Giới hạn I-term của vòng Angle)
+
+// Giới hạn cho vòng Rate (Inner)
+#define RATE_OUT_LIMIT   400.0f  // power (Đầu ra tối đa, +/- 400µs)
+#define RATE_I_LIMIT     400.0f  // (Giới hạn I-term của vòng Rate)
+/* USER CODE END PD */
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -48,6 +58,8 @@ I2C_HandleTypeDef hi2c1;
 TIM_HandleTypeDef htim3;
 
 UART_HandleTypeDef huart1;
+UART_HandleTypeDef huart2;
+UART_HandleTypeDef huart6;
 
 /* USER CODE BEGIN PV */
 uint32_t LoopTimer = 0;
@@ -80,9 +92,9 @@ float PIDReturn[]={0, 0, 0};
 // chua tune
 
 // PID gains
-float PRateRoll = 0.6f;  float PRatePitch = 0.6f;
-float PRateYaw  = 2.0f;
-float IRateRoll = 0.0f;  float IRatePitch = 0.0f;
+float PRateRoll = 0.45f;  float PRatePitch = 0.45f;
+float PRateYaw  = 1.50f;
+float IRateRoll = 0.0f;  float IRatePitch = 0.0f;   // khi bench test: tạm để 0.0f
 float IRateYaw  = 0.0f;
 float DRateRoll = 0.0f; float DRatePitch = 0.0f;
 float DRateYaw  = 0.0f;
@@ -92,11 +104,15 @@ float DesiredAngleRoll, DesiredAnglePitch;
 float ErrorAngleRoll,   ErrorAnglePitch;
 float PrevErrorAngleRoll, PrevErrorAnglePitch;
 float PrevItermAngleRoll, PrevItermAnglePitch;
-float PAngleRoll = 2.0f; float PAnglePitch = 2.0f;
-float IAngleRoll = 0.0f; float IAnglePitch = 0.0f;
-float DAngleRoll = 0.0f; float DAnglePitch = 0.0f;
+float PAngleRoll = 4.0f;  float PAnglePitch = 4.0f;
+float IAngleRoll = 0.0f;  float IAnglePitch = 0.0f;   // sau khi bay ổn định có thể thử 0.02f
+float DAngleRoll = 0.0f;  float DAnglePitch = 0.0f;
 //Motor Input
 float MotorInput1, MotorInput2, MotorInput3, MotorInput4;
+
+volatile uint16_t M1_us=1000, M2_us=1000, M3_us=1000, M4_us=1000;
+volatile int      Throttle_us = 1200;
+volatile float    M1_pct=0, M2_pct=0, M3_pct=0, M4_pct=0, Throttle_pct=0;
 
 #define I2C_TIMEOUT_MS 3 // vi vong lap 4ms nen de timeout 3ms
 
@@ -143,44 +159,58 @@ void gyro_signal(void){
 
   //doc accelerometer
   if (rd(&hi2c1, 0x3B, a, 6) == HAL_OK) {
-    int16_t AccXLSB = (int16_t)((a[0] << 8) | a[1]);
-    int16_t AccYLSB = (int16_t)((a[2] << 8) | a[3]);
-    int16_t AccZLSB = (int16_t)((a[4] << 8) | a[5]);
+	int16_t AccXLSB = (int16_t)((a[0] << 8) | a[1]);
+	int16_t AccYLSB = (int16_t)((a[2] << 8) | a[3]);
+	int16_t AccZLSB = (int16_t)((a[4] << 8) | a[5]);
 
 
 	AccX=(float)AccXLSB/4096;
 	AccY=(float)AccYLSB/4096;
 	AccZ=(float)AccZLSB/4096;
-  float denomR = sqrtf(AccX*AccX + AccZ*AccZ) + 1e-6f; // tranh chia cho 0
-  float denomP = sqrtf(AccY*AccY + AccZ*AccZ) + 1e-6f;
-  AngleRoll  = atanf(AccY / denomR) * RAD2DEG;
-  AnglePitch = -atanf(AccX / denomP) * RAD2DEG;
+	float denomR = sqrtf(AccX*AccX + AccZ*AccZ) + 1e-6f; // tranh chia cho 0
+	float denomP = sqrtf(AccY*AccY + AccZ*AccZ) + 1e-6f;
+	AngleRoll  = atanf(AccY / denomR) * RAD2DEG;
+	AnglePitch = -atanf(AccX / denomP) * RAD2DEG;
   }
 } 
 
 void pid_equation(float Error, float P , float I, float D, 
-                      float PrevError, float PrevIterm, float dt_s) {
-  float Pterm=P*Error;
-  float Iterm=PrevIterm+I*(Error+PrevError)*dt_s*0.5f;
-  if (Iterm > 400) Iterm=400; //anti windup
-  else if (Iterm <-400) Iterm=-400;
+                  float PrevError, float PrevIterm, float dt_s,
+                  float i_limit, float out_limit) {
+  float Pterm = P * Error;
+
+  // D dùng dt có chặn đáy
   float deriv_dt = (dt_s > 0.0005f) ? dt_s : 0.0005f;
   float Dterm = D * (Error - PrevError) / deriv_dt;
-  float PIDOutput = Pterm + Iterm + Dterm;
-  if (PIDOutput > 400) PIDOutput = 400;
-  else if (PIDOutput < -400) PIDOutput = -400;
-  PIDReturn[0] = PIDOutput;
+
+  // Tính output tạm thời (chưa tích I) để xét bão hòa
+  float pre = Pterm + PrevIterm + Dterm;
+
+  // Nếu đang bão hòa và lỗi cùng chiều → không tích I (anti-windup)
+  float Iterm = PrevIterm;
+  if (!((pre >=  out_limit && Error >  0) ||
+        (pre <= -out_limit && Error <  0))) {
+    Iterm = PrevIterm + I * (Error + PrevError) * (dt_s * 0.5f);
+    if (Iterm >  i_limit) Iterm =  i_limit;
+    if (Iterm < -i_limit) Iterm = -i_limit;
+  }
+
+  float out = Pterm + Iterm + Dterm;
+  if (out >  out_limit) out =  out_limit;
+  if (out < -out_limit) out = -out_limit;
+
+  PIDReturn[0] = out;
   PIDReturn[1] = Error;
   PIDReturn[2] = Iterm;
 }
 
 void reset_pid(void) {
-PrevErrorRateRoll=0; PrevErrorRatePitch=0; 
-PrevErrorRateYaw=0;
-PrevItermRateRoll=0; PrevItermRatePitch=0; 
-PrevItermRateYaw=0;
-PrevErrorAngleRoll=0; PrevErrorAnglePitch=0; 
-PrevItermAngleRoll=0; PrevItermAnglePitch=0;
+	PrevErrorRateRoll=0; PrevErrorRatePitch=0;
+	PrevErrorRateYaw=0;
+	PrevItermRateRoll=0; PrevItermRatePitch=0;
+	PrevItermRateYaw=0;
+	PrevErrorAngleRoll=0; PrevErrorAnglePitch=0;
+	PrevItermAngleRoll=0; PrevItermAnglePitch=0;
 }
 
 static inline uint16_t us_saturate(int v) {
@@ -191,6 +221,13 @@ static inline uint16_t us_saturate(int v) {
 static inline void set_motor_us(TIM_HandleTypeDef* htim, uint32_t ch, uint16_t us) {
   __HAL_TIM_SET_COMPARE(htim, ch, us); // 1 tick = 1 us
 }
+
+static inline float us_to_percent(uint16_t us) {
+  if (us <= 1000) return 0.0f;
+  if (us >= 2000) return 100.0f;
+  return (us - 1000) * 0.1f; // (us-1000)/1000*100
+}
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -199,6 +236,8 @@ static void MX_GPIO_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_TIM3_Init(void);
+static void MX_USART2_UART_Init(void);
+static void MX_USART6_UART_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -241,6 +280,8 @@ int main(void)
   MX_I2C1_Init();
   MX_USART1_UART_Init();
   MX_TIM3_Init();
+  MX_USART2_UART_Init();
+  MX_USART6_UART_Init();
   /* USER CODE BEGIN 2 */
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
@@ -324,35 +365,48 @@ int main(void)
     DesiredRateYaw    = 0.0f;
 
     //PID outer Loop
-    ErrorAngleRoll=DesiredAngleRoll - KalmanAngleRoll;
-    ErrorAnglePitch=DesiredAnglePitch -KalmanAnglePitch;
-    pid_equation(ErrorAngleRoll, PAngleRoll, 
-    IAngleRoll, DAngleRoll, PrevErrorAngleRoll,PrevItermAngleRoll, dt); 		
-    DesiredRateRoll=PIDReturn[0]; 
-    PrevErrorAngleRoll=PIDReturn[1];
-    PrevItermAngleRoll=PIDReturn[2];
-    pid_equation(ErrorAnglePitch, PAnglePitch, IAnglePitch, DAnglePitch, PrevErrorAnglePitch,
-    PrevItermAnglePitch, dt);
-    DesiredRatePitch=PIDReturn[0]; 
-    PrevErrorAnglePitch=PIDReturn[1];
-    PrevItermAnglePitch=PIDReturn[2];
+    ErrorAngleRoll = DesiredAngleRoll - KalmanAngleRoll;
+    ErrorAnglePitch = DesiredAnglePitch - KalmanAnglePitch;
+
+    pid_equation(ErrorAngleRoll, PAngleRoll, IAngleRoll, DAngleRoll,
+                 PrevErrorAngleRoll, PrevItermAngleRoll, dt,
+                 ANGLE_I_LIMIT, ANGLE_RATE_LIMIT); // Thêm 2 giới hạn
+    DesiredRateRoll = PIDReturn[0];
+    PrevErrorAngleRoll = PIDReturn[1];
+    PrevItermAngleRoll = PIDReturn[2];
+
+    pid_equation(ErrorAnglePitch, PAnglePitch, IAnglePitch, DAnglePitch,
+                 PrevErrorAnglePitch, PrevItermAnglePitch, dt,
+                 ANGLE_I_LIMIT, ANGLE_RATE_LIMIT); // Thêm 2 giới hạn
+    DesiredRatePitch = PIDReturn[0];
+    PrevErrorAnglePitch = PIDReturn[1];
+    PrevItermAnglePitch = PIDReturn[2];
 
     //PID inner Loop
-    ErrorRateRoll=DesiredRateRoll-RateRoll;
-    ErrorRatePitch=DesiredRatePitch-RatePitch;
-    ErrorRateYaw=DesiredRateYaw-RateYaw;
-    pid_equation(ErrorRateRoll, PRateRoll, IRateRoll, DRateRoll, PrevErrorRateRoll,PrevItermRateRoll,dt);
-    InputRoll=PIDReturn[0];
-    PrevErrorRateRoll=PIDReturn[1]; 
-    PrevItermRateRoll=PIDReturn[2];
-    pid_equation(ErrorRatePitch, PRatePitch, IRatePitch, DRatePitch, PrevErrorRatePitch,PrevItermRatePitch,dt);
-    InputPitch=PIDReturn[0]; 
-    PrevErrorRatePitch=PIDReturn[1]; 
-    PrevItermRatePitch=PIDReturn[2];
-    pid_equation(ErrorRateYaw, PRateYaw, IRateYaw, DRateYaw, PrevErrorRateYaw, PrevItermRateYaw,dt);
-    InputYaw=PIDReturn[0]; 
-    PrevErrorRateYaw=PIDReturn[1]; 
-    PrevItermRateYaw=PIDReturn[2];
+    ErrorRateRoll = DesiredRateRoll - RateRoll;
+    ErrorRatePitch = DesiredRatePitch - RatePitch;
+    ErrorRateYaw = DesiredRateYaw - RateYaw;
+    
+    pid_equation(ErrorRateRoll, PRateRoll, IRateRoll, DRateRoll,
+                 PrevErrorRateRoll, PrevItermRateRoll, dt,
+                 RATE_I_LIMIT, RATE_OUT_LIMIT); // Thêm 2 giới hạn
+    InputRoll = PIDReturn[0];
+    PrevErrorRateRoll = PIDReturn[1];
+    PrevItermRateRoll = PIDReturn[2];
+
+    pid_equation(ErrorRatePitch, PRatePitch, IRatePitch, DRatePitch,
+                 PrevErrorRatePitch, PrevItermRatePitch, dt,
+                 RATE_I_LIMIT, RATE_OUT_LIMIT); // Thêm 2 giới hạn
+    InputPitch = PIDReturn[0];
+    PrevErrorRatePitch = PIDReturn[1];
+    PrevItermRatePitch = PIDReturn[2];
+
+    pid_equation(ErrorRateYaw, PRateYaw, IRateYaw, DRateYaw,
+                 PrevErrorRateYaw, PrevItermRateYaw, dt,
+                 RATE_I_LIMIT, RATE_OUT_LIMIT); // Thêm 2 giới hạn
+    InputYaw = PIDReturn[0];
+    PrevErrorRateYaw = PIDReturn[1];
+    PrevItermRateYaw = PIDReturn[2];
     
     int throttle = 1200;
     uint16_t m1 = us_saturate((int)(throttle - InputRoll - InputPitch - InputYaw));
@@ -364,7 +418,13 @@ int main(void)
     set_motor_us(&htim3, TIM_CHANNEL_2, m2);
     set_motor_us(&htim3, TIM_CHANNEL_3, m3);
     set_motor_us(&htim3, TIM_CHANNEL_4, m4);
-  
+    Throttle_us = throttle;
+    M1_us = m1; M2_us = m2; M3_us = m3; M4_us = m4;
+    Throttle_pct = us_to_percent((uint16_t)Throttle_us);
+    M1_pct = us_to_percent(M1_us);
+    M2_pct = us_to_percent(M2_us);
+    M3_pct = us_to_percent(M3_us);
+    M4_pct = us_to_percent(M4_us);
   }
   /* USER CODE END 3 */
 }
@@ -540,6 +600,72 @@ static void MX_USART1_UART_Init(void)
   /* USER CODE BEGIN USART1_Init 2 */
 
   /* USER CODE END USART1_Init 2 */
+
+}
+
+/**
+  * @brief USART2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART2_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART2_Init 0 */
+
+  /* USER CODE END USART2_Init 0 */
+
+  /* USER CODE BEGIN USART2_Init 1 */
+
+  /* USER CODE END USART2_Init 1 */
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 115200;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_NONE;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART2_Init 2 */
+
+  /* USER CODE END USART2_Init 2 */
+
+}
+
+/**
+  * @brief USART6 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART6_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART6_Init 0 */
+
+  /* USER CODE END USART6_Init 0 */
+
+  /* USER CODE BEGIN USART6_Init 1 */
+
+  /* USER CODE END USART6_Init 1 */
+  huart6.Instance = USART6;
+  huart6.Init.BaudRate = 115200;
+  huart6.Init.WordLength = UART_WORDLENGTH_8B;
+  huart6.Init.StopBits = UART_STOPBITS_1;
+  huart6.Init.Parity = UART_PARITY_NONE;
+  huart6.Init.Mode = UART_MODE_TX_RX;
+  huart6.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart6.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart6) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART6_Init 2 */
+
+  /* USER CODE END USART6_Init 2 */
 
 }
 
