@@ -385,7 +385,7 @@ void Error_Handler(void)
   *         where the assert_param error has occurred.
   * @param  file: pointer to the source file name
   * @param  line: assert_param error line source number
-  * @retval None
+  * @retval None 
   */
 void assert_failed(uint8_t *file, uint32_t line)
 {
