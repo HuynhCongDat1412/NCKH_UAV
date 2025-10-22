@@ -38,13 +38,12 @@
 #define MOTOR_MIN_US       1000
 #define MOTOR_MAX_US       2000
 // Giới hạn cho vòng Angle (Outer)
-#define ANGLE_RATE_LIMIT 250.0f  // deg/s (Đầu ra tối đa)
+#define ANGLE_RATE_LIMIT 250.0f  // deg/s (Dau ra toi da cua outer loop)
 #define ANGLE_I_LIMIT    100.0f  //  (Giới hạn I-term của vòng Angle)
 
 // Giới hạn cho vòng Rate (Inner)
 #define RATE_OUT_LIMIT   400.0f  // power (Đầu ra tối đa, +/- 400µs)
 #define RATE_I_LIMIT     400.0f  // (Giới hạn I-term của vòng Rate)
-/* USER CODE END PD */
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -96,7 +95,7 @@ float IRateYaw  = 0.0f;
 float DRateRoll = 0.0f; float DRatePitch = 0.0f;
 float DRateYaw  = 0.0f;
 
-float PIDReturn[]={0, 0, 0};
+
 //-------Angle/OuterLoop
 float DesiredAngleRoll, DesiredAnglePitch;
 float ErrorAngleRoll,   ErrorAnglePitch;
@@ -553,7 +552,7 @@ static void MX_TIM3_Init(void)
     Error_Handler();
   }
   sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = 0;
+  sConfigOC.Pulse = 1000;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
   if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
