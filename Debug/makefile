@@ -9,7 +9,7 @@ RM := rm -rf
 
 # All of the sources participating in the build are defined here
 -include sources.mk
--include Drivers/STM32F4xx_HAL_Driver/Src/subdir.mk
+-include Drivers/STM32F1xx_HAL_Driver/Src/subdir.mk
 -include Core/Startup/subdir.mk
 -include Core/Src/subdir.mk
 -include objects.mk
@@ -34,34 +34,34 @@ $(wildcard ../makefile.init) \
 $(wildcard ../makefile.targets) \
 
 
-BUILD_ARTIFACT_NAME := FlightController
+BUILD_ARTIFACT_NAME := UAV_testRX_Sbus
 BUILD_ARTIFACT_EXTENSION := elf
 BUILD_ARTIFACT_PREFIX :=
 BUILD_ARTIFACT := $(BUILD_ARTIFACT_PREFIX)$(BUILD_ARTIFACT_NAME)$(if $(BUILD_ARTIFACT_EXTENSION),.$(BUILD_ARTIFACT_EXTENSION),)
 
 # Add inputs and outputs from these tool invocations to the build variables 
 EXECUTABLES += \
-FlightController.elf \
+UAV_testRX_Sbus.elf \
 
 MAP_FILES += \
-FlightController.map \
+UAV_testRX_Sbus.map \
 
 SIZE_OUTPUT += \
 default.size.stdout \
 
 OBJDUMP_LIST += \
-FlightController.list \
+UAV_testRX_Sbus.list \
 
 
 # All Target
 all: main-build
 
 # Main-build Target
-main-build: FlightController.elf secondary-outputs
+main-build: UAV_testRX_Sbus.elf secondary-outputs
 
 # Tool invocations
-FlightController.elf FlightController.map: $(OBJS) $(USER_OBJS) D:\hoc_tap_3\NCKH_UAV\FlightController\STM32F411CEUX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-gcc -o "FlightController.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m4 -T"D:\hoc_tap_3\NCKH_UAV\FlightController\STM32F411CEUX_FLASH.ld" --specs=nosys.specs -Wl,-Map="FlightController.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
+UAV_testRX_Sbus.elf UAV_testRX_Sbus.map: $(OBJS) $(USER_OBJS) D:\hoc_tap_3\NCKH_UAV\UAV_testRX_Sbus\STM32F103C8TX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-gcc -o "UAV_testRX_Sbus.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m3 -T"D:\hoc_tap_3\NCKH_UAV\UAV_testRX_Sbus\STM32F103C8TX_FLASH.ld" --specs=nosys.specs -Wl,-Map="UAV_testRX_Sbus.map" -Wl,--gc-sections -static --specs=nano.specs -mfloat-abi=soft -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
 	@echo 'Finished building target: $@'
 	@echo ' '
 
@@ -70,14 +70,14 @@ default.size.stdout: $(EXECUTABLES) makefile objects.list $(OPTIONAL_TOOL_DEPS)
 	@echo 'Finished building: $@'
 	@echo ' '
 
-FlightController.list: $(EXECUTABLES) makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-objdump -h -S $(EXECUTABLES) > "FlightController.list"
+UAV_testRX_Sbus.list: $(EXECUTABLES) makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-objdump -h -S $(EXECUTABLES) > "UAV_testRX_Sbus.list"
 	@echo 'Finished building: $@'
 	@echo ' '
 
 # Other Targets
 clean:
-	-$(RM) FlightController.elf FlightController.list FlightController.map default.size.stdout
+	-$(RM) UAV_testRX_Sbus.elf UAV_testRX_Sbus.list UAV_testRX_Sbus.map default.size.stdout
 	-@echo ' '
 
 secondary-outputs: $(SIZE_OUTPUT) $(OBJDUMP_LIST)

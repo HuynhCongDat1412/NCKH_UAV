@@ -21,9 +21,6 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include <string.h>
-#include <stdio.h>
-#include <math.h>
 
 /* USER CODE END Includes */
 
@@ -43,98 +40,74 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-I2C_HandleTypeDef hi2c1;
-
-UART_HandleTypeDef huart1;
+UART_HandleTypeDef huart2;
+DMA_HandleTypeDef hdma_usart2_rx;
 
 /* USER CODE BEGIN PV */
-uint32_t LoopTimer = 0;
-//gyro
-volatile float RateRoll, RatePitch, RateYaw = 0;
-float RateCalibrationRoll, RateCalibrationPitch, RateCalibrationYaw;
-int RateCalibrationNumber;
+#define SBUS_FRAME_SIZE    25
+#define SBUS_START_BYTE    0x0F
+#define SBUS_END_BYTE      0x00
 
+uint8_t sbus_rx_buffer[SBUS_FRAME_SIZE];
+uint16_t rc_channels[16];
+volatile uint8_t sbus_data_ready_flag = 0;
+uint16_t pulse_width;
+uint16_t throttle_channel_value;
 
-//accelerometer
-float AccX, AccY, AccZ;
-float AngleRoll, AnglePitch;
-float AngleCalibrationRoll = 0; // Thêm dòng này
-float AngleCalibrationPitch = 0; // Thêm dòng này
-
-//kalman filter
-float KalmanAngleRoll=0, 
-KalmanUncertaintyAngleRoll=2*2; //gia su sai so 2 do thi phuong sai la 2^2
-float KalmanAnglePitch=0, 
-KalmanUncertaintyAnglePitch=2*2;
-float Kalman1DOutput[]={0,0};
-
-// vi 0x68 co 7 bit ma ta dia chi can 8 bit nen ta dich 1 bit
-static inline HAL_StatusTypeDef wr8(I2C_HandleTypeDef* hi2c, uint8_t reg, uint8_t val) {
-  return HAL_I2C_Mem_Write(hi2c, 0x68<<1, reg, I2C_MEMADD_SIZE_8BIT, &val, 1, 100);
-}
-static inline HAL_StatusTypeDef rd(I2C_HandleTypeDef* hi2c, uint8_t reg, uint8_t* buf, uint16_t len) {
-  return HAL_I2C_Mem_Read(hi2c, 0x68<<1, reg, I2C_MEMADD_SIZE_8BIT, buf, len, 100);
-}
-
-//kalman filter lay input la: gia tri truoc do, sai so truoc do, input(rate_gyro), gia tri measure (angle_accelerometer) 
-void kalman_1d(float KalmanState, 
-  float KalmanUncertainty, float KalmanInput, 
-  float KalmanMeasurement) 
-  {
-    KalmanState=KalmanState+0.004*KalmanInput; //B1: du doan tho (raw) goc hien tai (angle(k) = angle(k-1) + dt*toc_do_goc )
-    KalmanUncertainty=KalmanUncertainty + 0.004*0.004 * 4 * 4; //B2 du doan tho (raw) sai so hien tai
-    float KalmanGain=KalmanUncertainty * 1/(1*KalmanUncertainty + 3 * 3); //B3: tinh he so kalman gain
-    KalmanState=KalmanState+KalmanGain * (KalmanMeasurement-KalmanState); //B4: du doan toi uu goc hien tai (angle_kalman)
-    KalmanUncertainty=(1-KalmanGain) *  KalmanUncertainty; //B5: du doan toi uu sai so hien tai (saiSo_kalman)
-    Kalman1DOutput[0]=KalmanState; //luu goc du doan_kalman hien tai
-    Kalman1DOutput[1]=KalmanUncertainty; //luu sai so du doan_kalman hien tai
- }
-void gyro_signal(void){
-  
-  uint8_t b[6];
-  uint8_t a[6]; //xem xet bo thang a, dung b cho ca gyro voi acce
-  // read register 0x43 -> 0x48 => 6 byte
-  // save to b[6], vi data cua gyro 16bit
-  //, ma chia ra 2 mang nen b[0] va b[1] la data day du cua rate_x, tuong tu y voi z
-  // tuy nhien voi sensing scale factor 65.5/ do/s thi ta chia gia tri doc duoc cho 65.5 => toc do  
-  if (rd(&hi2c1, 0x43, b, 6) == HAL_OK) {
-    int16_t gx_raw = (int16_t)((b[0] << 8) | b[1]);
-    int16_t gy_raw = (int16_t)((b[2] << 8) | b[3]);
-    int16_t gz_raw = (int16_t)((b[4] << 8) | b[5]);
-    const float sens = 65.5f; // LSB per (deg/s) for FS_SEL=1
-    RateRoll  = gx_raw / sens;
-    RatePitch = gy_raw / sens;
-    RateYaw   = gz_raw / sens;
-  }
-
-  //doc accelerometer
-  if (rd(&hi2c1, 0x3B, a, 6) == HAL_OK) {
-    int16_t AccXLSB = (int16_t)((a[0] << 8) | a[1]);
-    int16_t AccYLSB = (int16_t)((a[2] << 8) | a[3]);
-    int16_t AccZLSB = (int16_t)((a[4] << 8) | a[5]);
-
-
-	AccX=(float)AccXLSB/4096;
-	AccY=(float)AccYLSB/4096;
-	AccZ=(float)AccZLSB/4096;
-	AngleRoll=atan(AccY/sqrt(AccX*AccX+AccZ*AccZ))*1/(3.142/180);
-	AnglePitch=-atan(AccX/sqrt(AccY*AccY+AccZ*AccZ))*1/(3.142/180);
-  }
-} 
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
-static void MX_I2C1_Init(void);
-static void MX_USART1_UART_Init(void);
+static void MX_DMA_Init(void);
+static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+void sbus_decode(volatile uint8_t* sbus_frame, uint16_t* channels) {
+    // Kiểm tra Start Byte và End Byte
+    if (sbus_frame[0] != SBUS_START_BYTE || sbus_frame[24] != SBUS_END_BYTE) {
+        return; // Gói tin không hợp lệ
+    }
 
+    // Giải mã 16 kênh (mỗi kênh 11 bit)
+    channels[0]  = (uint16_t)((sbus_frame[1]    | sbus_frame[2] << 8) & 0x07FF);
+    channels[1]  = (uint16_t)((sbus_frame[2] >> 3 | sbus_frame[3] << 5) & 0x07FF);
+    channels[2]  = (uint16_t)((sbus_frame[3] >> 6 | sbus_frame[4] << 2 | sbus_frame[5] << 10) & 0x07FF);
+    channels[3]  = (uint16_t)((sbus_frame[5] >> 1 | sbus_frame[6] << 7) & 0x07FF);
+    channels[4]  = (uint16_t)((sbus_frame[6] >> 4 | sbus_frame[7] << 4) & 0x07FF);
+    channels[5]  = (uint16_t)((sbus_frame[7] >> 7 | sbus_frame[8] << 1 | sbus_frame[9] << 9) & 0x07FF);
+    channels[6]  = (uint16_t)((sbus_frame[9] >> 2 | sbus_frame[10] << 6) & 0x07FF);
+    channels[7]  = (uint16_t)((sbus_frame[10] >> 5 | sbus_frame[11] << 3) & 0x07FF);
+    channels[8]  = (uint16_t)((sbus_frame[12]   | sbus_frame[13] << 8) & 0x07FF);
+    channels[9]  = (uint16_t)((sbus_frame[13] >> 3 | sbus_frame[14] << 5) & 0x07FF);
+    channels[10] = (uint16_t)((sbus_frame[14] >> 6 | sbus_frame[15] << 2 | sbus_frame[16] << 10) & 0x07FF);
+    channels[11] = (uint16_t)((sbus_frame[16] >> 1 | sbus_frame[17] << 7) & 0x07FF);
+    channels[12] = (uint16_t)((sbus_frame[17] >> 4 | sbus_frame[18] << 4) & 0x07FF);
+    channels[13] = (uint16_t)((sbus_frame[18] >> 7 | sbus_frame[19] << 1 | sbus_frame[20] << 9) & 0x07FF);
+    channels[14] = (uint16_t)((sbus_frame[20] >> 2 | sbus_frame[21] << 6) & 0x07FF);
+    channels[15] = (uint16_t)((sbus_frame[21] >> 5 | sbus_frame[22] << 3) & 0x07FF);
+}
+
+void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
+{
+	if (huart->Instance == USART2)
+	{
+		if (Size == SBUS_FRAME_SIZE)
+		{
+			sbus_decode(sbus_rx_buffer, rc_channels);
+			sbus_data_ready_flag = 1;
+		}
+		HAL_UARTEx_ReceiveToIdle_DMA(&huart2, sbus_rx_buffer, SBUS_FRAME_SIZE);
+	}
+}
+
+long map(long value, long in_min, long in_max, long out_min, long out_max) {
+  return (value - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+}
 
 /* USER CODE END 0 */
 
@@ -167,69 +140,38 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_I2C1_Init();
-  MX_USART1_UART_Init();
+  MX_DMA_Init();
+  MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
-  HAL_Delay(250);
-    (void)wr8(&hi2c1, 0x6B, 0x00);  // wake mpu 
-  (void)wr8(&hi2c1, 0x1A,0x05); // cho thanh ghi 0x1A = 0x05 => low pass filter ~10hz
-  (void)wr8(&hi2c1, 0x1B,0x08); // config sensing scale factor la *65.5*/ do/s
-  //sample rate cua cam bien binh thuong la 8khz, neu bat lowpassfilter thi doc la 1000hz
-  (void)wr8(&hi2c1, 0x19, 0x03); // Set Sample Rate cua cam bien = 1kHz / (1 + 9) = 100Hz
-  (void)wr8(&hi2c1, 0x1C, 0x10); // set full scale range cua accelerometer la +-8g
-  
-  //calibrate gyro && accelerometer
-  for (RateCalibrationNumber = 0;
-	  RateCalibrationNumber < 2000;
-	  RateCalibrationNumber++)
-  {
-	  gyro_signal();
-	  RateCalibrationPitch += RatePitch;
-	  RateCalibrationRoll += RateRoll;
-	  RateCalibrationYaw += RateYaw;
-
-	  AngleCalibrationPitch += AnglePitch;
-	  AngleCalibrationRoll += AngleRoll;
-	  HAL_Delay(1);
-  }
-	RateCalibrationPitch/=2000;
-	RateCalibrationRoll/=2000;
-	RateCalibrationYaw/=2000;
-
-	AngleCalibrationPitch /= 2000;
-	AngleCalibrationRoll /= 2000;
-	LoopTimer = HAL_GetTick();
+  HAL_UARTEx_ReceiveToIdle_DMA(&huart2, sbus_rx_buffer, SBUS_FRAME_SIZE);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    /* USER CODE END WHILE */ 
+    /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    gyro_signal();
-    //calib gyro && accelerometer
-    RatePitch -= RateCalibrationPitch;
-    RateRoll -= RateCalibrationRoll;
-    RateYaw -= RateCalibrationYaw;
-    AnglePitch -= AngleCalibrationPitch;
-	AngleRoll -= AngleCalibrationRoll;
+    if (sbus_data_ready_flag) {
+	        sbus_data_ready_flag = 0;
+	        throttle_channel_value = rc_channels[2];
 
-    kalman_1d(KalmanAngleRoll,KalmanUncertaintyAngleRoll, RateRoll, AngleRoll);
-    KalmanAngleRoll=Kalman1DOutput[0];
-    KalmanUncertaintyAngleRoll=Kalman1DOutput[1];
-    kalman_1d(KalmanAnglePitch,KalmanUncertaintyAnglePitch, RatePitch, AnglePitch);
-    KalmanAnglePitch=Kalman1DOutput[0];
-    KalmanUncertaintyAnglePitch=Kalman1DOutput[1];
-    while (HAL_GetTick() - LoopTimer <4);
-    LoopTimer = HAL_GetTick();
+	        // pulse_width = map(throttle_channel_value, 398, 1993, 60, 99);
+	        // if (pulse_width < 60) pulse_width = 60;
+	        // if (pulse_width > 99) pulse_width = 99;
 
+	        // // Cập nhật độ rộng xung PWM
+	        // __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, pulse_width);
+	        // __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, pulse_width);
+	        // __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, pulse_width);
+	        // __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_4, pulse_width);
+	    }
   }
   /* USER CODE END 3 */
 }
 
-/**c
+/**
   * @brief System Clock Configuration
   * @retval None
   */
@@ -238,23 +180,16 @@ void SystemClock_Config(void)
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-  /** Configure the main internal regulator output voltage
-  */
-  __HAL_RCC_PWR_CLK_ENABLE();
-  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
-
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
-  RCC_OscInitStruct.PLL.PLLM = 8;
-  RCC_OscInitStruct.PLL.PLLN = 100;
-  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
-  RCC_OscInitStruct.PLL.PLLQ = 4;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -269,76 +204,58 @@ void SystemClock_Config(void)
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_3) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
   {
     Error_Handler();
   }
 }
 
 /**
-  * @brief I2C1 Initialization Function
+  * @brief USART2 Initialization Function
   * @param None
   * @retval None
   */
-static void MX_I2C1_Init(void)
+static void MX_USART2_UART_Init(void)
 {
 
-  /* USER CODE BEGIN I2C1_Init 0 */
+  /* USER CODE BEGIN USART2_Init 0 */
 
-  /* USER CODE END I2C1_Init 0 */
+  /* USER CODE END USART2_Init 0 */
 
-  /* USER CODE BEGIN I2C1_Init 1 */
+  /* USER CODE BEGIN USART2_Init 1 */
 
-  /* USER CODE END I2C1_Init 1 */
-  hi2c1.Instance = I2C1;
-  hi2c1.Init.ClockSpeed = 400000;
-  hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
-  hi2c1.Init.OwnAddress1 = 0;
-  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
-  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
-  hi2c1.Init.OwnAddress2 = 0;
-  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
-  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
-  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
+  /* USER CODE END USART2_Init 1 */
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 100000;
+  huart2.Init.WordLength = UART_WORDLENGTH_9B;
+  huart2.Init.StopBits = UART_STOPBITS_2;
+  huart2.Init.Parity = UART_PARITY_EVEN;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart2) != HAL_OK)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN I2C1_Init 2 */
+  /* USER CODE BEGIN USART2_Init 2 */
 
-  /* USER CODE END I2C1_Init 2 */
+  /* USER CODE END USART2_Init 2 */
 
 }
 
 /**
-  * @brief USART1 Initialization Function
-  * @param None
-  * @retval None
+  * Enable DMA controller clock
   */
-static void MX_USART1_UART_Init(void)
+static void MX_DMA_Init(void)
 {
 
-  /* USER CODE BEGIN USART1_Init 0 */
+  /* DMA controller clock enable */
+  __HAL_RCC_DMA1_CLK_ENABLE();
 
-  /* USER CODE END USART1_Init 0 */
-
-  /* USER CODE BEGIN USART1_Init 1 */
-
-  /* USER CODE END USART1_Init 1 */
-  huart1.Instance = USART1;
-  huart1.Init.BaudRate = 115200;
-  huart1.Init.WordLength = UART_WORDLENGTH_8B;
-  huart1.Init.StopBits = UART_STOPBITS_1;
-  huart1.Init.Parity = UART_PARITY_NONE;
-  huart1.Init.Mode = UART_MODE_TX_RX;
-  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
-  if (HAL_UART_Init(&huart1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN USART1_Init 2 */
-
-  /* USER CODE END USART1_Init 2 */
+  /* DMA interrupt init */
+  /* DMA1_Channel6_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel6_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel6_IRQn);
 
 }
 
@@ -353,8 +270,8 @@ static void MX_GPIO_Init(void)
 /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOD_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
-  __HAL_RCC_GPIOB_CLK_ENABLE();
 
 /* USER CODE BEGIN MX_GPIO_Init_2 */
 /* USER CODE END MX_GPIO_Init_2 */
