@@ -34,7 +34,16 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define RAD2DEG 57.2957795f
+#define MOTOR_MIN_US       1000
+#define MOTOR_MAX_US       2000
+// Giới hạn cho vòng Angle (Outer)
+#define ANGLE_RATE_LIMIT 250.0f  // deg/s (Dau ra toi da cua outer loop)
+#define ANGLE_I_LIMIT    100.0f  //  (Giới hạn I-term của vòng Angle)
 
+// Giới hạn cho vòng Rate (Inner)
+#define RATE_OUT_LIMIT   400.0f  // power (Đầu ra tối đa, +/- 400µs)
+#define RATE_I_LIMIT     400.0f  // (Giới hạn I-term của vòng Rate)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -45,39 +54,102 @@
 /* Private variables ---------------------------------------------------------*/
 I2C_HandleTypeDef hi2c1;
 
+TIM_HandleTypeDef htim3;
+
 UART_HandleTypeDef huart1;
+UART_HandleTypeDef huart2;
+UART_HandleTypeDef huart6;
 
 /* USER CODE BEGIN PV */
+uint32_t LoopTimer = 0; 
+float dt = 0.004f; //timer duy nhat kiem soat sample rate sensor, kalman, pid 
 //gyro
-volatile float RateRoll, RatePitch, RateYaw = 0;
-float RateCalibrationRoll, RateCalibrationPitch, RateCalibrationYaw;
-int RateCalibrationNumber;
-
+float RateRoll = 0.0f, RatePitch = 0.0f, RateYaw = 0.0f;
+float RateCalibrationRoll = 0.0f, RateCalibrationPitch = 0.0f, RateCalibrationYaw = 0.0f;
+int RateCalibrationNumber = 0;
 
 //accelerometer
-float AccX, AccY, AccZ;
-float AngleRoll, AnglePitch;
+float AccX = 0.0f, AccY = 0.0f, AccZ = 0.0f;
+float AngleRoll = 0.0f, AnglePitch = 0.0f;
+float AngleCalibrationRoll = 0.0f; //gia tri calib
+float AngleCalibrationPitch = 0.0f; //gia tri calib
 
+//kalman filter
+float KalmanAngleRoll=0.0f, KalmanUncertaintyAngleRoll=2*2; //gia su sai so 2 do thi phuong sai la 2^2
+float KalmanAnglePitch=0.0f, KalmanUncertaintyAnglePitch=2*2;
+
+//PID variable
+float PIDReturn[]={0, 0, 0};
+//-------Rate/innerLoop
+float DesiredRateRoll, DesiredRatePitch, DesiredRateYaw;
+float ErrorRateRoll, ErrorRatePitch, ErrorRateYaw;
+float InputRoll, InputThrottle, InputPitch, InputYaw; // power (us) dem vao motor
+float PrevErrorRateRoll, PrevErrorRatePitch,PrevErrorRateYaw;
+float PrevItermRateRoll, PrevItermRatePitch,PrevItermRateYaw;
+// chua tune
+// PID gains
+float PRateRoll = 0.45f;  float PRatePitch = 0.45f;
+float PRateYaw  = 1.50f;
+float IRateRoll = 0.0f;  float IRatePitch = 0.0f;   // khi bench test: tạm để 0.0f
+float IRateYaw  = 0.0f;
+float DRateRoll = 0.0f; float DRatePitch = 0.0f;
+float DRateYaw  = 0.0f;
+
+
+//-------Angle/OuterLoop
+float DesiredAngleRoll, DesiredAnglePitch;
+float ErrorAngleRoll,   ErrorAnglePitch;
+float PrevErrorAngleRoll, PrevErrorAnglePitch;
+float PrevItermAngleRoll, PrevItermAnglePitch;
+float PAngleRoll = 4.0f;  float PAnglePitch = 4.0f;
+float IAngleRoll = 0.0f;  float IAnglePitch = 0.0f;   // sau khi bay ổn định có thể thử 0.02f
+float DAngleRoll = 0.0f;  float DAnglePitch = 0.0f;
+//Motor Input
+float MotorInput1, MotorInput2, MotorInput3, MotorInput4;
+
+//Bien danh cho STM32CubeMonitor theo doi
+volatile uint16_t M1_us=1000, M2_us=1000, M3_us=1000, M4_us=1000;
+volatile int      Throttle_us = 1200;
+volatile float    M1_pct=0, M2_pct=0, M3_pct=0, M4_pct=0, Throttle_pct=0;
+
+#define I2C_TIMEOUT_MS 3 // vi vong lap 4ms nen de timeout 3ms
+
+//2 ham user de ghi va doc vao i2c
 // vi 0x68 co 7 bit ma ta dia chi can 8 bit nen ta dich 1 bit
 static inline HAL_StatusTypeDef wr8(I2C_HandleTypeDef* hi2c, uint8_t reg, uint8_t val) {
-  return HAL_I2C_Mem_Write(hi2c, 0x68<<1, reg, I2C_MEMADD_SIZE_8BIT, &val, 1, 100);
+  return HAL_I2C_Mem_Write(hi2c, 0x68<<1, reg, I2C_MEMADD_SIZE_8BIT, &val, 1, I2C_TIMEOUT_MS);
 }
 static inline HAL_StatusTypeDef rd(I2C_HandleTypeDef* hi2c, uint8_t reg, uint8_t* buf, uint16_t len) {
-  return HAL_I2C_Mem_Read(hi2c, 0x68<<1, reg, I2C_MEMADD_SIZE_8BIT, buf, len, 100);
+  return HAL_I2C_Mem_Read(hi2c, 0x68<<1, reg, I2C_MEMADD_SIZE_8BIT, buf, len, I2C_TIMEOUT_MS);
 }
 
+//kalman filter lay input la: gia tri truoc do, sai so truoc do, input(rate_gyro), gia tri measure (angle_accelerometer) 
+void kalman_1d(float* pKalmanState, 
+  float* pKalmanUncertainty, float KalmanInput, 
+  float KalmanMeasurement, float dt_s) 
+  {
+    float KalmanState = *pKalmanState; //lay gia tri k-1
+    float KalmanUncertainty = *pKalmanUncertainty; ////lay sai so k-1
+    KalmanState=KalmanState+dt_s*KalmanInput; //B1: du doan tho (raw) goc hien tai (angle(k) = angle(k-1) + dt*toc_do_goc )
+    KalmanUncertainty=KalmanUncertainty + dt_s*dt_s * 4 * 4; //B2 du doan tho (raw) sai so hien tai
+    float KalmanGain=KalmanUncertainty * 1/(1*KalmanUncertainty + 3 * 3); //B3: tinh he so kalman gain
+    KalmanState=KalmanState+KalmanGain * (KalmanMeasurement-KalmanState); //B4: du doan toi uu goc hien tai (angle_kalman)
+    KalmanUncertainty=(1-KalmanGain) *  KalmanUncertainty; //B5: du doan toi uu sai so hien tai (saiSo_kalman)
+    *pKalmanState=KalmanState; //luu goc du doan_kalman hien tai
+    *pKalmanUncertainty=KalmanUncertainty; //luu sai so du doan_kalman hien tai
+ }
 void gyro_signal(void){
   
-  uint8_t b[6];
-  uint8_t a[6]; //xem xet bo thang a, dung b cho ca gyro voi acce
+  uint8_t value[6];
+
   // read register 0x43 -> 0x48 => 6 byte
   // save to b[6], vi data cua gyro 16bit
   //, ma chia ra 2 mang nen b[0] va b[1] la data day du cua rate_x, tuong tu y voi z
   // tuy nhien voi sensing scale factor 65.5/ do/s thi ta chia gia tri doc duoc cho 65.5 => toc do  
-  if (rd(&hi2c1, 0x43, b, 6) == HAL_OK) {
-    int16_t gx_raw = (int16_t)((b[0] << 8) | b[1]);
-    int16_t gy_raw = (int16_t)((b[2] << 8) | b[3]);
-    int16_t gz_raw = (int16_t)((b[4] << 8) | b[5]);
+  if (rd(&hi2c1, 0x43, value, 6) == HAL_OK) {
+    int16_t gx_raw = (int16_t)((value[0] << 8) | value[1]);
+    int16_t gy_raw = (int16_t)((value[2] << 8) | value[3]);
+    int16_t gz_raw = (int16_t)((value[4] << 8) | value[5]);
     const float sens = 65.5f; // LSB per (deg/s) for FS_SEL=1
     RateRoll  = gx_raw / sens;
     RatePitch = gy_raw / sens;
@@ -85,19 +157,80 @@ void gyro_signal(void){
   }
 
   //doc accelerometer
-  if (rd(&hi2c1, 0x3B, a, 6) == HAL_OK) {
-    int16_t AccXLSB = (int16_t)((a[0] << 8) | a[1]);
-    int16_t AccYLSB = (int16_t)((a[2] << 8) | a[3]);
-    int16_t AccZLSB = (int16_t)((a[4] << 8) | a[5]);
+  if (rd(&hi2c1, 0x3B, value, 6) == HAL_OK) {
+	int16_t AccXLSB = (int16_t)((value[0] << 8) | value[1]);
+	int16_t AccYLSB = (int16_t)((value[2] << 8) | value[3]);
+	int16_t AccZLSB = (int16_t)((value[4] << 8) | value[5]);
 
 
 	AccX=(float)AccXLSB/4096;
 	AccY=(float)AccYLSB/4096;
 	AccZ=(float)AccZLSB/4096;
-	AngleRoll=atan(AccY/sqrt(AccX*AccX+AccZ*AccZ))*1/(3.142/180);
-	AnglePitch=-atan(AccX/sqrt(AccY*AccY+AccZ*AccZ))*1/(3.142/180);
+	float denomR = sqrtf(AccX*AccX + AccZ*AccZ) + 1e-6f; // tranh chia cho 0
+	float denomP = sqrtf(AccY*AccY + AccZ*AccZ) + 1e-6f;
+	AngleRoll  = atanf(AccY / denomR) * RAD2DEG;
+	AnglePitch = -atanf(AccX / denomP) * RAD2DEG;
   }
 } 
+
+//pid tranh I bao hoa, tich luy qua nhieu, vuot gioi han i_limit
+// tranh gia tri pid out vuot gioi han out_limit
+void pid_equation(float Error, float P , float I, float D, 
+                  float PrevError, float PrevIterm, float dt_s,
+                  float i_limit, float out_limit) {
+  float Pterm = P * Error;
+
+  // D dùng dt có chặn đáy
+  float deriv_dt = (dt_s > 0.0005f) ? dt_s : 0.0005f; //tranh dt qua nho ~ 0 thi chia bi loi
+  float Dterm = D * (Error - PrevError) / deriv_dt;
+
+  // Tính output tạm thời (chưa tích I) để xét bão hòa
+  float pre = Pterm + PrevIterm + Dterm;
+
+  float Iterm = PrevIterm;
+  // Nếu đang bão hòa và lỗi cùng chiều → không tích I (anti-windup)
+  if (!((pre >=  out_limit && Error >  0) ||
+        (pre <= -out_limit && Error <  0))) {
+    Iterm = PrevIterm + I * (Error + PrevError) * (dt_s * 0.5f); // dien tich hinh thang = (f(k-1) + f(k))*dt/2
+    if (Iterm >  i_limit) Iterm =  i_limit;
+    if (Iterm < -i_limit) Iterm = -i_limit;
+  }
+
+  float out = Pterm + Iterm + Dterm; //gia tri pid
+  if (out >  out_limit) out =  out_limit;
+  if (out < -out_limit) out = -out_limit;
+
+  PIDReturn[0] = out;
+  PIDReturn[1] = Error;
+  PIDReturn[2] = Iterm;
+}
+
+void reset_pid(void) {
+	PrevErrorRateRoll=0; PrevErrorRatePitch=0;	PrevErrorRateYaw=0;
+	PrevItermRateRoll=0; PrevItermRatePitch=0;	PrevItermRateYaw=0;
+	PrevErrorAngleRoll=0; PrevErrorAnglePitch=0;
+	PrevItermAngleRoll=0; PrevItermAnglePitch=0;
+}
+
+//gioi han gia tri power (us) gui ve esc
+static inline uint16_t us_saturate(int v) {
+  if (v < 1000) v = 1000;
+  if (v > 2000) v = 2000;
+  return (uint16_t)v;
+}
+
+// gui power den dong co, thuong di chung voi us_saturate
+static inline void set_motor_us(TIM_HandleTypeDef* htim, uint32_t ch, uint16_t us) {
+  __HAL_TIM_SET_COMPARE(htim, ch, us); // 1 tick = 1 us
+}
+
+//De hien thi Monitor
+static inline float us_to_percent(uint16_t us) {
+  if (us <= 1000) return 0.0f;
+  if (us >= 2000) return 100.0f;
+  return (us - 1000) * 0.1f; // (us-1000)/1000*100
+}
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -105,6 +238,9 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_USART1_UART_Init(void);
+static void MX_TIM3_Init(void);
+static void MX_USART2_UART_Init(void);
+static void MX_USART6_UART_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -146,18 +282,28 @@ int main(void)
   MX_GPIO_Init();
   MX_I2C1_Init();
   MX_USART1_UART_Init();
+  MX_TIM3_Init();
+  MX_USART2_UART_Init();
+  MX_USART6_UART_Init();
   /* USER CODE BEGIN 2 */
-  HAL_Delay(250); 
-  (void)wr8(&hi2c1, 0x1A,0x05); // cho thanh ghi 0x1A = 0x05 => low pass filter ~10hz
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_3);
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_4);
+  set_motor_us(&htim3,TIM_CHANNEL_1,1000);
+  set_motor_us(&htim3,TIM_CHANNEL_2,1000);
+  set_motor_us(&htim3,TIM_CHANNEL_3,1000);
+  set_motor_us(&htim3,TIM_CHANNEL_4,1000);
+  HAL_Delay(250);
+  (void)wr8(&hi2c1, 0x6B, 0x00);  // wake mpu 
+  (void)wr8(&hi2c1, 0x1A,0x03); // cho thanh ghi 0x1A = 0x03 => low pass filter ~44hz
   (void)wr8(&hi2c1, 0x1B,0x08); // config sensing scale factor la *65.5*/ do/s
   //sample rate cua cam bien binh thuong la 8khz, neu bat lowpassfilter thi doc la 1000hz
-  (void)wr8(&hi2c1, 0x19, 0x09); // Set Sample Rate cua cam bien = 1kHz / (1 + 9) = 100Hz
-  (void)wr8(&hi2c1, 0x1C, 0x10);
+  (void)wr8(&hi2c1, 0x19, 0x03); // Set Sample Rate cua cam bien 250hz
+  (void)wr8(&hi2c1, 0x1C, 0x10); // set full scale range cua accelerometer la +-8g
   
-  
-  
-  (void)wr8(&hi2c1, 0x6B, 0x00);  // wake mpu
-  //calibrate gyro
+  //calibrate gyro && accelerometer
+  // doc 2000 lan, tinh trung binh roi tru di gia tri trung binh do
   for (RateCalibrationNumber = 0;
 	  RateCalibrationNumber < 2000;
 	  RateCalibrationNumber++)
@@ -166,31 +312,132 @@ int main(void)
 	  RateCalibrationPitch += RatePitch;
 	  RateCalibrationRoll += RateRoll;
 	  RateCalibrationYaw += RateYaw;
+
+	  AngleCalibrationPitch += AnglePitch;
+	  AngleCalibrationRoll += AngleRoll;
 	  HAL_Delay(1);
   }
-  RateCalibrationPitch/=2000;
-  RateCalibrationRoll/=2000;
-  RateCalibrationYaw/=2000;
+  //gia tri calib
+	RateCalibrationPitch/=2000;
+	RateCalibrationRoll/=2000;
+	RateCalibrationYaw/=2000;
+	AngleCalibrationPitch /= 2000;
+	AngleCalibrationRoll /= 2000;
+
+  reset_pid();
+	LoopTimer = HAL_GetTick();
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    /* USER CODE END WHILE */ 
+    /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    gyro_signal();         // đọc gyro
+    // Timing gate at ~250 Hz
+    while ((HAL_GetTick() - LoopTimer) < 4) {}
+    uint32_t now = HAL_GetTick();
+    dt = (now - LoopTimer) * 0.001f; // second -> miliseconds
+    if (dt < 0.001f) dt = 0.001f;    // clamp to avoid div-by-zero/noise
+    if (dt > 0.02f)  dt = 0.02f;
+    LoopTimer = now;
+
+    gyro_signal();
+    //calib gyro && accelerometer
     RatePitch -= RateCalibrationPitch;
     RateRoll -= RateCalibrationRoll;
     RateYaw -= RateCalibrationYaw;
-    HAL_Delay(50);         // như Arduino: 50 ms
+    AnglePitch -= AngleCalibrationPitch;
+	  AngleRoll -= AngleCalibrationRoll;
 
+    kalman_1d(&KalmanAngleRoll,  &KalmanUncertaintyAngleRoll,  RateRoll,  AngleRoll,  dt);
+    kalman_1d(&KalmanAnglePitch, &KalmanUncertaintyAnglePitch, RatePitch, AnglePitch, dt);
+
+
+    // read_receiver();
+    // DesiredAngleRoll=0.10*(ReceiverValue[0]-1500);
+    // DesiredAnglePitch=0.10*(ReceiverValue[1]-1500);
+    // InputThrottle=ReceiverValue[2];
+    // DesiredRateYaw=0.15*(ReceiverValue[3]-1500);
+    // InputThrottle=ReceiverValue[2];
+    // DesiredRateYaw=0.15*(ReceiverValue[3]-1500);
+
+    //hardcode test 
+    DesiredAngleRoll  = 0.0f;
+    DesiredAnglePitch = 0.0f;
+    DesiredRateYaw    = 0.0f;
+
+    //PID outer Loop
+    ErrorAngleRoll = DesiredAngleRoll - KalmanAngleRoll;
+    ErrorAnglePitch = DesiredAnglePitch - KalmanAnglePitch;
+
+    pid_equation(ErrorAngleRoll, PAngleRoll, IAngleRoll, DAngleRoll,
+                 PrevErrorAngleRoll, PrevItermAngleRoll, dt,
+                 ANGLE_I_LIMIT, ANGLE_RATE_LIMIT); 
+    DesiredRateRoll = PIDReturn[0];
+    PrevErrorAngleRoll = PIDReturn[1];
+    PrevItermAngleRoll = PIDReturn[2];
+
+    pid_equation(ErrorAnglePitch, PAnglePitch, IAnglePitch, DAnglePitch,
+                 PrevErrorAnglePitch, PrevItermAnglePitch, dt,
+                 ANGLE_I_LIMIT, ANGLE_RATE_LIMIT); 
+    DesiredRatePitch = PIDReturn[0];
+    PrevErrorAnglePitch = PIDReturn[1];
+    PrevItermAnglePitch = PIDReturn[2];
+
+    //PID inner Loop
+    ErrorRateRoll = DesiredRateRoll - RateRoll;
+    ErrorRatePitch = DesiredRatePitch - RatePitch;
+    ErrorRateYaw = DesiredRateYaw - RateYaw;
+    
+    pid_equation(ErrorRateRoll, PRateRoll, IRateRoll, DRateRoll,
+                 PrevErrorRateRoll, PrevItermRateRoll, dt,
+                 RATE_I_LIMIT, RATE_OUT_LIMIT); 
+    InputRoll = PIDReturn[0];
+    PrevErrorRateRoll = PIDReturn[1];
+    PrevItermRateRoll = PIDReturn[2];
+
+    pid_equation(ErrorRatePitch, PRatePitch, IRatePitch, DRatePitch,
+                 PrevErrorRatePitch, PrevItermRatePitch, dt,
+                 RATE_I_LIMIT, RATE_OUT_LIMIT); 
+    InputPitch = PIDReturn[0];
+    PrevErrorRatePitch = PIDReturn[1];
+    PrevItermRatePitch = PIDReturn[2];
+
+    pid_equation(ErrorRateYaw, PRateYaw, IRateYaw, DRateYaw,
+                 PrevErrorRateYaw, PrevItermRateYaw, dt,
+                 RATE_I_LIMIT, RATE_OUT_LIMIT); 
+    InputYaw = PIDReturn[0];
+    PrevErrorRateYaw = PIDReturn[1];
+    PrevItermRateYaw = PIDReturn[2];
+    
+    int throttle = 1200;
+    //gioi han 1000 den 2000 us
+    uint16_t m1 = us_saturate((int)(throttle - InputRoll - InputPitch - InputYaw));
+    uint16_t m2 = us_saturate((int)(throttle - InputRoll + InputPitch + InputYaw));
+    uint16_t m3 = us_saturate((int)(throttle + InputRoll + InputPitch - InputYaw));
+    uint16_t m4 = us_saturate((int)(throttle + InputRoll - InputPitch + InputYaw));
+
+    //gui cho dong co power (us)
+    set_motor_us(&htim3, TIM_CHANNEL_1, m1);
+    set_motor_us(&htim3, TIM_CHANNEL_2, m2);
+    set_motor_us(&htim3, TIM_CHANNEL_3, m3);
+    set_motor_us(&htim3, TIM_CHANNEL_4, m4);
+
+    //phan nay de hien thi monitor
+    Throttle_us = throttle;
+    M1_us = m1; M2_us = m2; M3_us = m3; M4_us = m4;
+    Throttle_pct = us_to_percent((uint16_t)Throttle_us);
+    M1_pct = us_to_percent(M1_us);
+    M2_pct = us_to_percent(M2_us);
+    M3_pct = us_to_percent(M3_us);
+    M4_pct = us_to_percent(M4_us);
   }
   /* USER CODE END 3 */
 }
 
-/**c
+/**
   * @brief System Clock Configuration
   * @retval None
   */
@@ -252,7 +499,7 @@ static void MX_I2C1_Init(void)
 
   /* USER CODE END I2C1_Init 1 */
   hi2c1.Instance = I2C1;
-  hi2c1.Init.ClockSpeed = 400000;
+  hi2c1.Init.ClockSpeed = 100000;
   hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
   hi2c1.Init.OwnAddress1 = 0;
   hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
@@ -267,6 +514,67 @@ static void MX_I2C1_Init(void)
   /* USER CODE BEGIN I2C1_Init 2 */
 
   /* USER CODE END I2C1_Init 2 */
+
+}
+
+/**
+  * @brief TIM3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM3_Init(void)
+{
+
+  /* USER CODE BEGIN TIM3_Init 0 */
+
+  /* USER CODE END TIM3_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+
+  /* USER CODE BEGIN TIM3_Init 1 */
+
+  /* USER CODE END TIM3_Init 1 */
+  htim3.Instance = TIM3;
+  htim3.Init.Prescaler = 99;
+  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim3.Init.Period = 2499;
+  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_PWM_Init(&htim3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 1000;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM3_Init 2 */
+
+  /* USER CODE END TIM3_Init 2 */
+  HAL_TIM_MspPostInit(&htim3);
 
 }
 
@@ -300,6 +608,72 @@ static void MX_USART1_UART_Init(void)
   /* USER CODE BEGIN USART1_Init 2 */
 
   /* USER CODE END USART1_Init 2 */
+
+}
+
+/**
+  * @brief USART2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART2_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART2_Init 0 */
+
+  /* USER CODE END USART2_Init 0 */
+
+  /* USER CODE BEGIN USART2_Init 1 */
+
+  /* USER CODE END USART2_Init 1 */
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 115200;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_NONE;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART2_Init 2 */
+
+  /* USER CODE END USART2_Init 2 */
+
+}
+
+/**
+  * @brief USART6 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART6_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART6_Init 0 */
+
+  /* USER CODE END USART6_Init 0 */
+
+  /* USER CODE BEGIN USART6_Init 1 */
+
+  /* USER CODE END USART6_Init 1 */
+  huart6.Instance = USART6;
+  huart6.Init.BaudRate = 115200;
+  huart6.Init.WordLength = UART_WORDLENGTH_8B;
+  huart6.Init.StopBits = UART_STOPBITS_1;
+  huart6.Init.Parity = UART_PARITY_NONE;
+  huart6.Init.Mode = UART_MODE_TX_RX;
+  huart6.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart6.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart6) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART6_Init 2 */
+
+  /* USER CODE END USART6_Init 2 */
 
 }
 
