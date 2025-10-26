@@ -126,10 +126,10 @@ float IAngleRoll = 0.0f;  float IAnglePitch = 0.0f;   // sau khi bay ổn địn
 float DAngleRoll = 0.0f;  float DAnglePitch = 0.0f;
 //Motor Input
 float MotorInput1, MotorInput2, MotorInput3, MotorInput4;
-uint16_t m1 = 0;
-uint16_t m2 = 0;
-uint16_t m3 = 0;
-uint16_t m4 = 0;
+uint8_t m1 = 0;
+uint8_t m2 = 0;
+uint8_t m3 = 0;
+uint8_t m4 = 0;
 //Bien danh cho STM32CubeMonitor theo doi
 volatile uint16_t M1_us=1000, M2_us=1000, M3_us=1000, M4_us=1000;
 volatile int      Throttle_us = 1200;
@@ -249,7 +249,7 @@ void reset_pid(void) {
 //gioi han gia tri power (us) gui ve esc
 static inline uint16_t pulse_saturate(int v) {
   if (v < 10) v = 10;
-  if (v > 100) v = 100;
+  if (v > 90) v = 90;
   return (uint16_t)v;
 }
 
@@ -548,14 +548,14 @@ int main(void)
     pid_equation(ErrorRateRoll, PRateRoll, IRateRoll, DRateRoll,
                  PrevErrorRateRoll, PrevItermRateRoll, dt,
                  RATE_I_LIMIT, RATE_OUT_LIMIT); 
-    InputRoll = PIDReturn[0];
+    InputRoll = PIDReturn[0]*0.1;
     PrevErrorRateRoll = PIDReturn[1];
     PrevItermRateRoll = PIDReturn[2];
 
     pid_equation(ErrorRatePitch, PRatePitch, IRatePitch, DRatePitch,
                  PrevErrorRatePitch, PrevItermRatePitch, dt,
                  RATE_I_LIMIT, RATE_OUT_LIMIT); 
-    InputPitch = PIDReturn[0];
+    InputPitch = 0.05*PIDReturn[0];
     PrevErrorRatePitch = PIDReturn[1];
     PrevItermRatePitch = PIDReturn[2];
 
@@ -565,11 +565,11 @@ int main(void)
     InputYaw = PIDReturn[0];
     PrevErrorRateYaw = PIDReturn[1];
     PrevItermRateYaw = PIDReturn[2];
-    throttle_channel_value = 60;
-    m1 = pulse_saturate((uint16_t)(throttle_channel_value - InputRoll - InputPitch - InputYaw));
-    m2 = pulse_saturate((uint16_t)(throttle_channel_value - InputRoll + InputPitch + InputYaw));
-    m3 = pulse_saturate((uint16_t)(throttle_channel_value + InputRoll + InputPitch - InputYaw));
-    m4 = pulse_saturate((uint16_t)(throttle_channel_value + InputRoll - InputPitch + InputYaw));
+//    throttle_channel_value = 60;
+    m1 = pulse_saturate((uint16_t)(throttle_channel_value - InputRoll - InputPitch));// - InputYaw));
+    m2 = pulse_saturate((uint16_t)(throttle_channel_value - InputRoll + InputPitch));// + InputYaw));
+    m3 = pulse_saturate((uint16_t)(throttle_channel_value + InputRoll + InputPitch));//  - InputYaw));
+    m4 = pulse_saturate((uint16_t)(throttle_channel_value + InputRoll - InputPitch)); //+ InputYaw));
 
     //gui cho dong co power (us)
     TIM3->CCR1 = m1;
