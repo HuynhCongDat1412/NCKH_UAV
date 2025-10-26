@@ -1,0 +1,45 @@
+// ...existing code...
+static inline void kalman_predict_only(float* pKalmanState, float* pKalmanUncertainty,
+                                       float KalmanInput, float dt_s) {
+  float s = *pKalmanState;
+  float u = *pKalmanUncertainty;
+  s = s + dt_s * KalmanInput;
+  u = u + dt_s*dt_s * 4 * 4; // cùng process noise như trong kalman_1d
+  *pKalmanState = s;
+  *pKalmanUncertainty = u;
+}
+// ...existing code...
+
+// ...existing code...
+    gyro_signal();
+
+    // Chụp cờ cập nhật trước khi clear để điều khiển luồng Kalman
+    bool had_gyro = (mpu6050_gyro_flag != 0);
+    bool had_acc  = (mpu6050_acc_flag  != 0);
+
+    //calib gyro && accelerometer
+    if (mpu6050_gyro_flag){
+      mpu6050_gyro_flag = 0;
+      RatePitch -= RateCalibrationPitch;
+      RateRoll  -= RateCalibrationRoll;
+      RateYaw   -= RateCalibrationYaw;
+    }
+    if (mpu6050_acc_flag) {
+      mpu6050_acc_flag = 0;
+      AnglePitch -= AngleCalibrationPitch;
+      AngleRoll  -= AngleCalibrationRoll;
+    }
+
+    // Kalman: nếu có accel thì update đầy đủ, chỉ có gyro thì predict-only, nếu không có gì thì bỏ qua vòng
+    if (had_gyro || had_acc) {
+      if (had_acc) {
+        kalman_1d(&KalmanAngleRoll,  &KalmanUncertaintyAngleRoll,  RateRoll,  AngleRoll,  dt);
+        kalman_1d(&KalmanAnglePitch, &KalmanUncertaintyAnglePitch, RatePitch, AnglePitch, dt);
+      } else {
+        kalman_predict_only(&KalmanAngleRoll,  &KalmanUncertaintyAngleRoll,  RateRoll,  dt);
+        kalman_predict_only(&KalmanAnglePitch, &KalmanUncertaintyAnglePitch, RatePitch, dt);
+      }
+    } else {
+      continue; // không có mẫu mới -> tránh tích lũy sai
+    }
+// ...existing code...
