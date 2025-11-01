@@ -3,27 +3,30 @@
 
 #include "main.h"
 
+// I2C handle from main
 extern I2C_HandleTypeDef hi2c1;
-
-void I2C_Bus_Init(void);
+/**
+ * @brief write 1 byte (8bit) to register of device address          
+ * @param devAddr 7bit address must be shifted to the left before calling the interface 
+ * @param reg register address in device, 8 bit register
+ * @param pData pointer to value's address 
+ * @retval HAL_status (HAL_OK, HAL_ERROR, HAL_TIMEOUT)
+ */
+HAL_StatusTypeDef I2C_Write8(uint16_t devAddr,uint8_t reg,uint8_t *pDataIn);
 
 /**
- * @brief Ghi 1 byte vào 1 thanh ghi (Mem) của một thiết bị I2C
- * @param dev_addr Địa chỉ 7-bit của thiết bị (đã dịch trái 1 bit)
- * @param reg Địa chỉ thanh ghi để ghi
- * @param val Giá trị 1 byte để ghi
- * @retval HAL_StatusTypeDef
+ * @brief read 1 byte (8bit) from register of device address
+ * @param devAddr 7bit address must be shifted to the left before calling the interface 
+ * @param reg register address in device, 8 bit register
+ * @param pDataOut Data read from register of Device
+ * @retval HAL_status (HAL_OK, HAL_ERROR, HAL_TIMEOUT)
  */
-HAL_StatusTypeDef I2C_Mem_Write8(uint8_t dev_addr, uint8_t reg, uint8_t val);
+HAL_StatusTypeDef I2C_Read(uint16_t devAddr,uint8_t reg,uint8_t *pDataOut, uint8_t dataSize);
 
 /**
- * @brief Đọc nhiều byte từ 1 thanh ghi (Mem) của một thiết bị I2C
- * @param dev_addr Địa chỉ 7-bit của thiết bị (đã dịch trái 1 bit)
- * @param reg Địa chỉ thanh ghi bắt đầu đọc
- * @param buf Con trỏ đến buffer để lưu dữ liệu
- * @param len Số byte cần đọc
- * @retval HAL_StatusTypeDef
+ * @brief I2C_Write8 and I2C_Read with some retry if fail
+ * @param retryNum number of retry
  */
-HAL_StatusTypeDef I2C_Mem_Read(uint8_t dev_addr, uint8_t reg, uint8_t* buf, uint16_t len);
-
-#endif /* INC_I2C_H_ */
+HAL_StatusTypeDef I2C_Write8_Retry(uint16_t devAddr,uint8_t reg,uint8_t *pDataIn, uint8_t retryNum);
+HAL_StatusTypeDef I2C_Read_Retry(uint16_t devAddr,uint8_t reg,uint8_t *pDataOut, uint8_t dataSize, uint8_t retryNum);
+#endif

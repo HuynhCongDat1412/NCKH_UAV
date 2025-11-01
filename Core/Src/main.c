@@ -35,7 +35,7 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define RAD2DEG 57.2957795f
-#define Calibrate 0
+//#define Calibrate 0
 #define ESC_MIN_CCR 50
 #define ESC_MAX_CCR 100
 // Giới hạn cho vòng Angle (Outer)
@@ -58,6 +58,13 @@
 #define SBUS_MAX 1641 //do
 #define IDLE_US 1050
 
+#define SBUS_ROLL_MIN 712 //do
+#define SBUS_ROLL_MAX 1494 //do
+#define SBUS_PITCH_MIN 662 //do
+#define SBUS_PITCH_MAX 1494 //do
+#define SBUS_YAWRATE_MIN 505 //do
+#define SBUS_YAWRATE_MAX 1310 //do
+
 #define Calibrate 1
 /* USER CODE END PD */
 
@@ -74,6 +81,7 @@ TIM_HandleTypeDef htim3;
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 UART_HandleTypeDef huart6;
+DMA_HandleTypeDef hdma_usart1_rx;
 DMA_HandleTypeDef hdma_usart2_rx;
 
 /* USER CODE BEGIN PV */
@@ -93,6 +101,13 @@ float AngleRoll = 0.0f, AnglePitch = 0.0f;
 float AngleCalibrationRoll = 0.0f; //gia tri calib
 float AngleCalibrationPitch = 0.0f; //gia tri calib
 
+//GY-951
+uint8_t gy951_rx_buffer[64]; // Bo dem de nhan data (64 byte la an toan)
+uint8_t gy951_data_to_process[64];
+volatile uint8_t gy951_data_ready_flag = 0;
+volatile uint16_t gy951_data_size = 0;
+
+float Yaw, Roll, Pitch;
 //kalman filter
 float KalmanAngleRoll=0.0f, KalmanUncertaintyAngleRoll=2*2; //gia su sai so 2 do thi phuong sai la 2^2
 float KalmanAnglePitch=0.0f, KalmanUncertaintyAnglePitch=2*2;
@@ -124,6 +139,8 @@ float PrevItermAngleRoll, PrevItermAnglePitch;
 float PAngleRoll = 2.0f;  float PAnglePitch = 2.0f;
 float IAngleRoll = 0.0f;  float IAnglePitch = 0.0f;   // sau khi bay ổn định có thể thử 0.02f
 float DAngleRoll = 0.0f;  float DAnglePitch = 0.0f;
+
+
 //Motor Input
 float MotorInput1, MotorInput2, MotorInput3, MotorInput4;
 uint8_t m1 = 0;
@@ -248,8 +265,8 @@ void reset_pid(void) {
 
 //gioi han gia tri power (us) gui ve esc
 static inline uint16_t pulse_saturate(int v) {
-  if (v < 10) v = 10;
-  if (v > 90) v = 90;
+  if (v < ESC_MIN_CCR) v = ESC_MIN_CCR;
+  if (v > ESC_MAX_CCR) v = ESC_MAX_CCR;
   return (uint16_t)v;
 }
 
@@ -306,14 +323,30 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 		HAL_UARTEx_ReceiveToIdle_DMA(&huart2, sbus_rx_buffer, SBUS_FRAME_SIZE);
     __HAL_DMA_DISABLE_IT(&hdma_usart2_rx, DMA_IT_HT); // tránh callback nửa khung
 	}
+//  else if (huart->Instance == USART1) // == Day la GY-951
+//    {
+//        // Copy data da nhan vao bo dem xu ly
+//        memcpy(gy951_data_to_process, gy951_rx_buffer, Size);
+//        gy951_data_to_process[Size] = '\0'; // Bien no thanh 1 chuoi string
+//
+//        gy951_data_size = Size; // Luu lai kich thuoc goi tin
+//        gy951_data_ready_flag = 1; // Bat co bao hieu cho while(1)
+//
+//        // Khoi dong lai DMA de nhan goi tiep theo
+//        HAL_UARTEx_ReceiveToIdle_DMA(&huart1, gy951_rx_buffer, 64);
+//    }
 }
 
 //map gia tri trong khoang [in_min,in_max] -> [out_min, out_max]
 long map(long value, long in_min, long in_max, long out_min, long out_max) {
+	if (value < in_min) value = in_min;
+  if (value > in_max) value = in_max;
   return (value - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
 }
 
 static inline float fmap(long value, long in_min, long in_max, float out_min, float out_max) {
+	if (value < in_min) value = in_min;
+	if (value > in_max) value = in_max;
   return out_min + (float)(value - in_min) * (out_max - out_min) / (float)(in_max - in_min);
 }
 
@@ -335,7 +368,7 @@ static void MX_USART6_UART_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
+int8_t items_matched;
 
 /* USER CODE END 0 */
 
@@ -403,6 +436,8 @@ int main(void)
   (void)wr8(&hi2c1, 0x1C, 0x10); // set full scale range cua accelerometer la +-8g
 
   HAL_UARTEx_ReceiveToIdle_DMA(&huart2, sbus_rx_buffer, SBUS_FRAME_SIZE); //bat callback
+//  HAL_UARTEx_ReceiveToIdle_DMA(&huart1, gy951_rx_buffer, 64);
+
 	__HAL_DMA_DISABLE_IT(&hdma_usart2_rx, DMA_IT_HT);   // tắt ngat giua chung khi dang doc tin nhan uart
 
 
@@ -431,15 +466,15 @@ int main(void)
   //chan an toan khi chua khoi dong, can phai gat can throttle ve min roi moi bay duoc
   // Chờ tín hiệu SBUS đầu tiên
 // Chờ tín hiệu SBUS đầu tiên
-  while (sbus_data_ready_flag == 0) { HAL_Delay(1); }
-  // Chờ ga về min
-  while ( (uint16_t)map(rc_channels[2], SBUS_MIN, SBUS_MAX, ESC_MIN_CCR, 99) > ESC_MIN_CCR+5 ) {
-  sbus_data_ready_flag = 0;
-  while (sbus_data_ready_flag == 0) { HAL_Delay(1); }
-}
+   while (sbus_data_ready_flag == 0) { HAL_Delay(1); }
+   // Chờ ga về min
+   while ( (uint16_t)map(rc_channels[2], SBUS_MIN, SBUS_MAX, ESC_MIN_CCR, ESC_MAX_CCR) > ESC_MIN_CCR*1.2 ) {
+ 	  sbus_data_ready_flag = 0;
+ 	  while (sbus_data_ready_flag == 0) { HAL_Delay(1); }
+ }
 
   reset_pid();
-	LoopTimer = HAL_GetTick();
+  LoopTimer = HAL_GetTick();
   
   /* USER CODE END 2 */
 
@@ -460,19 +495,20 @@ int main(void)
 
     if (sbus_data_ready_flag) {
       sbus_data_ready_flag = 0;
-      throttle_channel_value = (uint16_t)map(rc_channels[2], SBUS_MIN, SBUS_MAX, ESC_MIN_CCR, 99);
+      throttle_channel_value = (uint16_t)map(rc_channels[2], SBUS_MIN, SBUS_MAX, ESC_MIN_CCR, ESC_MAX_CCR);
       // Dùng bộ lọc EMA để làm mượt ga ??? co can cai nay khong
       throttle_pulse_filt = (throttle_pulse_filt * 0.75f) + (throttle_channel_value * 0.25f);
 
       // 2. Ánh xạ các kênh điều khiển (Roll, Pitch, Yaw)
-      DesiredAngleRoll = fmap(rc_channels[0], SBUS_MIN, SBUS_MAX, -30, 30);
-      DesiredAnglePitch = fmap(rc_channels[1], SBUS_MIN, SBUS_MAX, -30, 30);
-      DesiredRateYaw = fmap(rc_channels[3], SBUS_MIN, SBUS_MAX, -150, 150);
-    }
-        // nhan input roi nhung cu hardcode test truoc
-    DesiredAngleRoll  = 0.0f;
-    DesiredAnglePitch = 0.0f;
-    DesiredRateYaw    = 0.0f;
+      DesiredAngleRoll = fmap(rc_channels[0], SBUS_ROLL_MIN, SBUS_ROLL_MAX, -30, 30);
+      DesiredAnglePitch = fmap(rc_channels[1], SBUS_PITCH_MIN, SBUS_PITCH_MAX, -30, 30);
+      DesiredRateYaw = fmap(rc_channels[3], SBUS_YAWRATE_MIN, SBUS_YAWRATE_MAX, -150, 150);
+      DesiredRateYaw = 0;
+    }     
+    //     // nhan input roi nhung cu hardcode test truoc
+    // DesiredAngleRoll  = 0.0f;
+    // DesiredAnglePitch = 0.0f;
+    // DesiredRateYaw    = 0.0f;
 
     // Logic Fail 1: Mat song >50ms
     bool fs = (HAL_GetTick() - last_sbus_ms) > 50;
@@ -480,7 +516,7 @@ int main(void)
     else {throttle_channel_value = (uint16_t)throttle_pulse_filt;}
 
     //Logic Fail 2: Tat dong co thu cong
-      if (throttle_channel_value < 60) 
+      if (throttle_channel_value < ESC_MIN_CCR*1.2)
       {
         throttle_channel_value = ESC_MIN_CCR; // tat dong co
         reset_pid();
@@ -508,7 +544,6 @@ int main(void)
     	RatePitch -= RateCalibrationPitch;
 		RateRoll -= RateCalibrationRoll;
 		RateYaw -= RateCalibrationYaw;
-
     }
     if (mpu6050_acc_flag) {
     	mpu6050_acc_flag = 0;
@@ -516,12 +551,21 @@ int main(void)
 		AngleRoll -= AngleCalibrationRoll;
     }
 
+    
 
     kalman_1d(&KalmanAngleRoll,  &KalmanUncertaintyAngleRoll,  RateRoll,  AngleRoll,  dt);
     kalman_1d(&KalmanAnglePitch, &KalmanUncertaintyAnglePitch, RatePitch, AnglePitch, dt);    
     
-
-
+//    if (gy951_data_ready_flag)
+//    {
+//        gy951_data_ready_flag = 0;
+//
+//        // Dung sscanf de "boc tach" chuoi data
+//        // Dinh dang: #YPR=float,float,float
+//        items_matched = sscanf((char*)gy951_data_to_process, "#YPR=%f,%f,%f", &Yaw, &Pitch, &Roll);
+//
+//
+//    }
     //PID outer Loop
     ErrorAngleRoll = DesiredAngleRoll - KalmanAngleRoll;
     ErrorAnglePitch = DesiredAnglePitch - KalmanAnglePitch;
@@ -566,16 +610,16 @@ int main(void)
     PrevErrorRateYaw = PIDReturn[1];
     PrevItermRateYaw = PIDReturn[2];
 //    throttle_channel_value = 60;
-    m1 = pulse_saturate((uint16_t)(throttle_channel_value - InputRoll - InputPitch));// - InputYaw));
-    m2 = pulse_saturate((uint16_t)(throttle_channel_value - InputRoll + InputPitch));// + InputYaw));
-    m3 = pulse_saturate((uint16_t)(throttle_channel_value + InputRoll + InputPitch));//  - InputYaw));
-    m4 = pulse_saturate((uint16_t)(throttle_channel_value + InputRoll - InputPitch)); //+ InputYaw));
+    m1 = pulse_saturate((uint16_t)(throttle_channel_value - InputRoll - InputPitch - InputYaw));
+    m2 = pulse_saturate((uint16_t)(throttle_channel_value - InputRoll + InputPitch + InputYaw));
+    m3 = pulse_saturate((uint16_t)(throttle_channel_value + InputRoll + InputPitch - InputYaw));
+    m4 = pulse_saturate((uint16_t)(throttle_channel_value + InputRoll - InputPitch + InputYaw));
 
-    //gui cho dong co power (us)
-    TIM3->CCR1 = m1;
-    TIM3->CCR2 = m2;
-    TIM3->CCR3 = m3;
-    TIM3->CCR4 = m4;
+    // //gui cho dong co power (us)
+     TIM3->CCR1 = m1;
+     TIM3->CCR2 = m2;
+     TIM3->CCR3 = m3;
+     TIM3->CCR4 = m4;
 
   }
   /* USER CODE END 3 */
@@ -748,7 +792,7 @@ static void MX_USART1_UART_Init(void)
 
   /* USER CODE END USART1_Init 1 */
   huart1.Instance = USART1;
-  huart1.Init.BaudRate = 115200;
+  huart1.Init.BaudRate = 57600;
   huart1.Init.WordLength = UART_WORDLENGTH_8B;
   huart1.Init.StopBits = UART_STOPBITS_1;
   huart1.Init.Parity = UART_PARITY_NONE;
@@ -839,11 +883,15 @@ static void MX_DMA_Init(void)
 
   /* DMA controller clock enable */
   __HAL_RCC_DMA1_CLK_ENABLE();
+  __HAL_RCC_DMA2_CLK_ENABLE();
 
   /* DMA interrupt init */
   /* DMA1_Stream5_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Stream5_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA1_Stream5_IRQn);
+  /* DMA2_Stream2_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA2_Stream2_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA2_Stream2_IRQn);
 
 }
 
